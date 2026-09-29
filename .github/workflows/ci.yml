@@ -1,0 +1,99 @@
+name: CI
+
+# The contracts package is consumed straight from this repository
+# (github:Cosmic-Arcana/cosmic-arcana-sdk#semver:^0.1.0), so publishing a version means creating
+# its tag. The tag is what every consumer's lockfile resolves to, and what the application release
+# manifest pins.
+
+on:
+  push:
+    branches: [development, main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sdk-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: verify contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+
+      - name: The package installs the way consumers install it
+        run: |
+          set -euo pipefail
+          work=$(mktemp -d)
+          cd "$work"
+          npm init -y > /dev/null
+          npm install --silent "git+file://${GITHUB_WORKSPACE}#${GITHUB_SHA}"
+          node -e "const sdk = require('@cosmic-arcana/sdk'); if (typeof sdk.parseSpreadCreatedV1 !== 'function') { throw new Error('the installed package does not expose its parsers'); } console.log('installed package exposes ' + Object.keys(sdk).length + ' exports');"
+
+  tag:
+    name: tag version
+    # A tag is this package's release. Immutable by convention: an existing tag is never moved.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+      created: ${{ steps.tag.outputs.created }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create the version tag if it is new
+        id: tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./package.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if git rev-parse "v$version" > /dev/null 2>&1; then
+            echo "v$version already exists; bump the version in package.json to release a new one"
+            echo 'created=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git tag "v$version"
+          git push origin "v$version"
+          gh release create "v$version" --title "v$version" \
+            --notes "Contracts package. Consumers pin it as github:Cosmic-Arcana/cosmic-arcana-sdk#semver:^$version."
+          echo 'created=true' >> "$GITHUB_OUTPUT"
+          echo "tagged v$version" >> "$GITHUB_STEP_SUMMARY"
+
+  notify:
+    name: notify infrastructure
+    needs: tag
+    if: needs.tag.outputs.created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Dispatch contract-published
+        env:
+          GH_TOKEN: ${{ secrets.INFRA_DISPATCH_TOKEN }}
+          VERSION: ${{ needs.tag.outputs.version }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::INFRA_DISPATCH_TOKEN is not set; the application manifest was not updated"
+            exit 0
+          fi
+          jq -n --arg version "$VERSION" --arg commit '${{ github.sha }}' \
+            '{event_type: "contract-published", client_payload: {version: $version, commit: $commit}}' \
+          | gh api --method POST /repos/${{ github.repository_owner }}/cosmic-arcana-infrastructure/dispatches --input -
