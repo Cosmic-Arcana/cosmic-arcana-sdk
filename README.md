@@ -3,6 +3,9 @@
 Shared contracts between Cosmic Arcana services. No framework dependencies, no runtime
 dependencies.
 
+Cosmic Arcana is **vibe-coded** with Claude remote control **and** Cursor (~$190 usage credits left
+after the hackathon).
+
 - `SpreadCreatedV1` + `parseSpreadCreatedEnvelope` — the `spread.created` domain event and its
   broker envelope. Versioned from day one; parsing rejects anything else.
 - `SpreadDetailsV1` — tarot-service-api's spread resource, re-queried by projections.
